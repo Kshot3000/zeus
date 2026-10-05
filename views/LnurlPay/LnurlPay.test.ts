@@ -35,7 +35,7 @@ jest.mock('../../utils/LnurlPayUtils', () => ({
     verifyLnurlPayInvoice: jest.fn(),
     isLnurlCallbackAllowed: jest.fn()
 }));
-jest.mock('react-native-blob-util', () => ({}));
+jest.mock('react-native-blob-util', () => ({ fetch: jest.fn() }));
 jest.mock('react-native-gesture-handler', () => ({ ScrollView: 'ScrollView' }));
 jest.mock('../../components/Amount', () => 'Amount');
 jest.mock('../../components/AmountInput', () => 'AmountInput');
@@ -50,9 +50,12 @@ jest.mock('../../models/Contact', () => class Contact {});
 
 import * as React from 'react';
 import { Alert } from 'react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import LnurlPay from './LnurlPay';
 import Amount from '../../components/Amount';
 import AmountInput from '../../components/AmountInput';
+import Button from '../../components/Button';
+import { isLnurlCallbackAllowed } from '../../utils/LnurlPayUtils';
 import { unitsStore } from '../../stores/Stores';
 
 const FIXED_SATS = 12618;
@@ -359,5 +362,100 @@ describe('LnurlPay with invalid lnurlParams', () => {
         buttons[0].onPress();
 
         expect(view.props.navigation.goBack).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('LnurlPay fixed amounts that are not whole sats', () => {
+    const fetchMock = ReactNativeBlobUtil.fetch as jest.Mock;
+    let alertSpy: jest.SpyInstance;
+
+    const lnurlParamsMsat = (msat: number) => ({
+        domain: 'example.com',
+        callback: 'https://example.com/callback',
+        minSendable: msat,
+        maxSendable: msat,
+        metadata: JSON.stringify([['text/plain', 'test']]),
+        commentAllowed: 0
+    });
+
+    // sendValues on a view that was never mounted: apply setState to the
+    // state object directly, like the focus test above
+    const makeSendableView = (msat: number) => {
+        const view = makeView({ lnurlParams: lnurlParamsMsat(msat) });
+        jest.spyOn(view, 'setState').mockImplementation((update: any) => {
+            view.state = {
+                ...view.state,
+                ...(typeof update === 'function' ? update(view.state) : update)
+            };
+        });
+        return view;
+    };
+
+    // Press Confirm and return the amount the callback was called with.
+    // The mocked fetch answers with an error envelope, so the flow stops
+    // right after the callback request.
+    const callbackAmount = async (view: LnurlPay) => {
+        fetchMock.mockResolvedValue({
+            json: () => ({ status: 'ERROR', reason: 'stop here' }),
+            text: () => 'stop here'
+        });
+        const button = findByType(view.render(), Button);
+        expect(button.props.disabled).toBeFalsy();
+        await button.props.onPress();
+        // flush the fetch promise chain
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const calledUrl = fetchMock.mock.calls[0][1] as string;
+        const match = calledUrl.match(/[?&]amount=([^&]*)/);
+        expect(match).not.toBeNull();
+        return decodeURIComponent(match![1]);
+    };
+
+    beforeEach(() => {
+        fetchMock.mockReset();
+        (isLnurlCallbackAllowed as jest.Mock).mockReturnValue({ ok: true });
+        alertSpy = jest
+            .spyOn(Alert, 'alert')
+            .mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+        alertSpy.mockRestore();
+    });
+
+    it('keeps the msat precision of a fixed amount in state', () => {
+        const view = makeSendableView(12618500);
+
+        expect(view.state.satAmount).toBe(12618.5);
+        expect(view.state.amount).toBe('12618.5');
+    });
+
+    it('sends a fixed 12618500 msat request as 12618500, not 12618000', async () => {
+        const view = makeSendableView(12618500);
+
+        await expect(callbackAmount(view)).resolves.toBe('12618500');
+    });
+
+    it('sends a fixed 1001 msat request as 1001, not 1000', async () => {
+        const view = makeSendableView(1001);
+
+        expect(view.state.satAmount).toBe(1.001);
+        await expect(callbackAmount(view)).resolves.toBe('1001');
+    });
+
+    it('can send a fixed 500 msat request at all', async () => {
+        const view = makeSendableView(500);
+
+        expect(view.state.satAmount).toBe(0.5);
+        await expect(callbackAmount(view)).resolves.toBe('500');
+    });
+
+    it('still sends a fixed whole-sat request unchanged', async () => {
+        const view = makeSendableView(12618000);
+
+        expect(view.state.satAmount).toBe(FIXED_SATS);
+        expect(view.state.amount).toBe('12618');
+        await expect(callbackAmount(view)).resolves.toBe('12618000');
     });
 });
