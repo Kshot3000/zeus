@@ -199,8 +199,6 @@ export default class LnurlPay extends React.Component<
             resetUnits();
         }
 
-        const minSendableSats = Math.floor(lnurl.minSendable / 1000);
-
         let finalAmount: string;
         let finalSatAmount: string | number;
         let fiatError: string | undefined;
@@ -213,8 +211,14 @@ export default class LnurlPay extends React.Component<
             // keeps the prefill correct whether or not resetUnits() above has
             // run, so the value and the unit the input renders in are decided
             // here and not by the global unit.
-            finalAmount = getRawAmountFromSats(minSendableSats, 'sats').amount;
-            finalSatAmount = minSendableSats;
+            // minSendable is in msat and is not always a whole number of
+            // sats: keep the exact value, fractional sats included. Flooring
+            // here asked the callback for less than minSendable, and a
+            // fixed amount under 1000 msat floored to 0, which disabled
+            // Confirm and made the request unpayable.
+            const fixedAmountSats = lnurl.minSendable / 1000;
+            finalAmount = getRawAmountFromSats(fixedAmountSats, 'sats').amount;
+            finalSatAmount = fixedAmountSats;
         } else if (satAmount && satAmount != 0) {
             // If satAmount is provided, always derive display amount from it
             // (ignore any `amount` param as it may be in a different unit)
@@ -285,9 +289,10 @@ export default class LnurlPay extends React.Component<
 
         const u = url.parse(lnurl.callback);
         const qs = querystring.parse(u.query);
-        qs.amount = Number(
-            (parseFloat(satAmount.toString()) * 1000).toString()
-        );
+        // satAmount can carry msat precision (a fixed request that is not
+        // a whole number of sats): round to the nearest msat so float
+        // error (1.001 sats * 1000 = 1000.999...) never reaches the callback
+        qs.amount = Math.round(parseFloat(satAmount.toString()) * 1000);
         // The exact msat we asked for; the returned invoice must match it.
         const requestedAmountMsat = qs.amount;
         qs.comment = comment;
